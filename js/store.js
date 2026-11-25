@@ -872,7 +872,9 @@
     logActivity: function (payload) {
       const dateStr = payload.date || todayISO();
       const item = {
-        id: uid('act'),
+        id: const item = {
+        id: payload.id || uid('act'),
+        timestamp: new Date().toISOString(),
         timestamp: new Date().toISOString(),
         date: dateStr,
         type: payload.type || 'activity',
