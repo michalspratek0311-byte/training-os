@@ -870,13 +870,11 @@
     },
 
     logActivity: function (payload) {
-      const dateStr = payload.date || todayISO();
-      const item = {
-        id: const item = {
-        id: payload.id || uid('act'),
-        timestamp: new Date().toISOString(),
-        timestamp: new Date().toISOString(),
-        date: dateStr,
+   const dateStr = payload.date || todayISO();
+   const item = {
+     id: payload.id || uid('act'),
+     timestamp: new Date().toISOString(),
+     date: dateStr,
         type: payload.type || 'activity',
         phase: payload.phase || phaseIdxToCode(this.state.ui.currentPhaseIdx),
         detail: payload.detail || '',
