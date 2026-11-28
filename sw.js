@@ -1,4 +1,4 @@
-const CACHE_NAME = 'training-os-v2.0.3';
+const CACHE_NAME = 'training-os-v2.1.0';
 const ASSETS = [
   './',
   './index.html',
@@ -29,9 +29,10 @@ self.addEventListener('activate', function (event) {
           .filter(function (k) { return k !== CACHE_NAME; })
           .map(function (k) { return caches.delete(k); })
       );
+    }).then(function () {
+      return self.clients.claim();
     })
   );
-  self.clients.claim();
 });
 
 self.addEventListener('fetch', function (event) {
@@ -42,24 +43,35 @@ self.addEventListener('fetch', function (event) {
   // API volání (script.google.com apod.) nikdy necachovat v SW
   if (url.origin !== self.location.origin) return;
 
-  // Stale-While-Revalidate: bleskový start z cache + tichá aktualizace na pozadí
-  event.respondWith(
-    caches.match(req).then(function (cached) {
-      const networkFetch = fetch(req)
+  // Network-First pro kód (HTML/JS/CSS): vždy aktuální konzistentní verze online, bleskový fallback na cache offline
+  const isCodeAsset = req.mode === 'navigate' || /\.(html|js|css|json)$/i.test(url.pathname);
+  if (isCodeAsset) {
+    event.respondWith(
+      fetch(req)
         .then(function (res) {
           if (res && res.status === 200 && res.type === 'basic') {
             const copy = res.clone();
-            caches.open(CACHE_NAME).then(function (cache) {
-              cache.put(req, copy);
-            });
+            caches.open(CACHE_NAME).then(function (cache) { cache.put(req, copy); });
           }
           return res;
         })
         .catch(function () {
-          return cached;
-        });
+          return caches.match(req);
+        })
+    );
+    return;
+  }
 
-      return cached || networkFetch;
+  // Cache-First pro statické ikony / obrázky
+  event.respondWith(
+    caches.match(req).then(function (cached) {
+      return cached || fetch(req).then(function (res) {
+        if (res && res.status === 200 && res.type === 'basic') {
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then(function (cache) { cache.put(req, copy); });
+        }
+        return res;
+      });
     })
   );
 });

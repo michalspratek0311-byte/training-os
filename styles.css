@@ -194,6 +194,7 @@ button, input, select, textarea {
 .row-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
 
 /* ===== Odznaky (Badges) ===== */
 .badge {
@@ -325,7 +326,8 @@ button, input, select, textarea {
   padding: 13px;
   margin-bottom: 10px;
 }
-.ex-card.done { border-color: rgba(16, 185, 129, 0.45); }
+.ex-card.partial { border-color: rgba(59, 130, 246, 0.45); }
+.ex-card.done { border-color: rgba(16, 185, 129, 0.55); }
 
 .setup-box {
   margin-top: 8px;
@@ -335,6 +337,19 @@ button, input, select, textarea {
   border-left: 3px solid var(--accent);
   font-size: 12.5px;
   color: var(--text-muted);
+}
+
+.suggest-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  margin-bottom: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  font-size: 12.5px;
 }
 
 .ghost-line {
@@ -404,12 +419,22 @@ button, input, select, textarea {
   border: 1px solid var(--accent);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
 }
+.floating-timer.ft-interval-mode {
+  border-color: var(--gold);
+  cursor: pointer;
+}
+.floating-timer.ft-interval-mode .ft-delta {
+  display: none;
+}
 .ft-label {
   display: block;
   font-size: 10.5px;
   font-weight: 700;
   color: #60a5fa;
   letter-spacing: 0.6px;
+}
+.floating-timer.ft-interval-mode .ft-label {
+  color: var(--gold);
 }
 .ft-time {
   font-size: 22px;
@@ -459,6 +484,21 @@ button, input, select, textarea {
   width: 100%;
   height: auto;
   display: block;
+}
+.chart-point-hit {
+  cursor: pointer;
+}
+.chart-tooltip {
+  margin-top: 6px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px;
 }
 
 .hbar-row { margin-bottom: 8px; }
@@ -584,22 +624,27 @@ button, input, select, textarea {
   cursor: pointer;
 }
 
-/* ===== Toast ===== */
+/* ===== Toast (nikdy nepřekrývá plovoucí pauzovač) ===== */
 .toast {
   position: fixed;
   left: 50%;
   bottom: calc(var(--nav-h) + 18px + env(safe-area-inset-bottom));
   transform: translateX(-50%);
   z-index: 80;
+  max-width: calc(100vw - 28px);
   padding: 10px 16px;
-  border-radius: 999px;
+  border-radius: 14px;
   background: #1e293b;
   border: 1px solid var(--border);
   color: var(--text);
   font-size: 13px;
   font-weight: 600;
+  text-align: center;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  white-space: nowrap;
+  transition: bottom 0.15s ease;
+}
+body.has-floating-timer .toast {
+  bottom: calc(var(--nav-h) + 84px + env(safe-area-inset-bottom));
 }
 
 details summary {

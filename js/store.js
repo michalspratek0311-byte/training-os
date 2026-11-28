@@ -1,5 +1,5 @@
 /**
- * Training OS v2.0 — Datové jádro, API synchronizace, multi-gym logika a sdílené utility
+ * Training OS v2.1 — Datové jádro, API synchronizace, multi-gym logika a sdílené utility
  */
 (function () {
   'use strict';
@@ -7,7 +7,8 @@
   const STORAGE_KEY = 'training_os_v2_state';
 
   const DEFAULT_API_URL = 'https://script.google.com/macros/s/AKfycbyyKecUhMJQJdqEDZ2nvwDCC5ddp4NGM4z1fPRA2zqRQsD14f1Qvzcb11SiR8lql132MA/exec';
-  const DEFAULT_API_TOKEN = '1974';
+  // Token nikdy neukládáme natvrdo ve veřejném kódu — uživatel ho zadá jednou v záložce Sync (uloží se jen do localStorage)
+  const DEFAULT_API_TOKEN = '';
 
   const CNS_PRIORITY_MAP = {
     'Dřepový vzor': 1,
@@ -55,6 +56,7 @@
         ftp: 265,
         map: 360,
         vt1: 132,
+        bodyweight: 80,
         sound: true,
         voice: true,
         restCompound: 150,
@@ -64,6 +66,7 @@
         activeTab: 'workout',
         currentPhaseIdx: 0,
         readiness: 'full', // full | mild | high
+        readinessDate: todayISO(),
         activeGymId: '',
         lastSyncAt: '',
         syncStatus: 'idle' // idle | syncing | online | pending | error
@@ -83,21 +86,43 @@
     };
   }
 
-  function loadState() {
+  function normalizeState(parsed) {
     const def = createDefaultState();
+    const p = parsed && typeof parsed === 'object' ? parsed : {};
+    const pData = p.data && typeof p.data === 'object' ? p.data : {};
+    const normalized = {
+      settings: Object.assign({}, def.settings, p.settings || {}),
+      ui: Object.assign({}, def.ui, p.ui || {}),
+      data: {
+        schedule: Array.isArray(pData.schedule) && pData.schedule.length ? pData.schedule : def.data.schedule,
+        planStrength: Object.assign({ F1: [], F3: [], F6: [] }, pData.planStrength || {}),
+        zones: Array.isArray(pData.zones) ? pData.zones : [],
+        ideas: Array.isArray(pData.ideas) ? pData.ideas : [],
+        gyms: Array.isArray(pData.gyms) ? pData.gyms : [],
+        catalog: Array.isArray(pData.catalog) ? pData.catalog : [],
+        strengthLogs: Array.isArray(pData.strengthLogs) ? pData.strengthLogs : [],
+        activityLogs: Array.isArray(pData.activityLogs) ? pData.activityLogs : [],
+        big3Dates: Array.isArray(pData.big3Dates) ? pData.big3Dates : []
+      },
+      outbox: Array.isArray(p.outbox) ? p.outbox : []
+    };
+    // Automatický reset připravenosti (readiness) na nový den
+    const today = todayISO();
+    if (normalized.ui.readinessDate !== today) {
+      normalized.ui.readiness = 'full';
+      normalized.ui.readinessDate = today;
+    }
+    return normalized;
+  }
+
+  function loadState() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return def;
-      const parsed = JSON.parse(raw);
-      return {
-        settings: Object.assign({}, def.settings, parsed.settings || {}),
-        ui: Object.assign({}, def.ui, parsed.ui || {}),
-        data: Object.assign({}, def.data, parsed.data || {}),
-        outbox: Array.isArray(parsed.outbox) ? parsed.outbox : []
-      };
+      if (!raw) return createDefaultState();
+      return normalizeState(JSON.parse(raw));
     } catch (err) {
       console.warn('Chyba načtení localStorage, používám výchozí stav:', err);
-      return def;
+      return createDefaultState();
     }
   }
 
@@ -112,12 +137,22 @@
       .replace(/'/g, '&#39;');
   }
 
-  function todayISO() {
-    const d = new Date();
+  function dateToISO(d) {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
     return y + '-' + m + '-' + day;
+  }
+
+  function todayISO() {
+    return dateToISO(new Date());
+  }
+
+  function shiftDateISO(iso, deltaDays) {
+    const d = parseISODate(iso || todayISO());
+    if (!d) return todayISO();
+    d.setDate(d.getDate() + deltaDays);
+    return dateToISO(d);
   }
 
   function formatDateCZ(iso) {
@@ -179,15 +214,15 @@
   function round2(n) { return Math.round(n * 100) / 100; }
 
   function calcE1RM(weight, reps) {
-    const w = toNum(weight);
-    const r = toNum(reps);
+    const w = Math.max(0, toNum(weight));
+    const r = Math.max(0, toNum(reps));
     if (w <= 0 || r <= 0) return 0;
     if (r === 1) return round1(w);
     return round1(w * (1 + r / 30));
   }
 
   function calcTonnage(weight, reps) {
-    return round2(toNum(weight) * toNum(reps));
+    return round2(Math.max(0, toNum(weight)) * Math.max(0, toNum(reps)));
   }
 
   function computeMachineKey(resistanceType, gymName, exerciseName) {
@@ -208,6 +243,63 @@
 
   function phaseIdxToCode(idx) {
     return 'F' + (idx + 1);
+  }
+
+  function isWeightedBodyweightName(name) {
+    const n = String(name || '').toLowerCase();
+    return /(dip|dipy|shyb|pull[\s-]?up|chin[\s-]?up|klik|muscle[\s-]?up)/i.test(n);
+  }
+
+  function parseTargetSetsCount(targetSetsReps) {
+    const m = String(targetSetsReps || '').match(/^\s*(\d+)\s*[×xX*]/);
+    if (m) return Math.max(1, parseInt(m[1], 10));
+    const m2 = String(targetSetsReps || '').match(/(\d+)\s*sér/i);
+    if (m2) return Math.max(1, parseInt(m2[1], 10));
+    return 2; // výchozí 2 pracovní série (Top + Back-off)
+  }
+
+  /**
+   * Parsuje vytrvalostní metriky z jednoho záznamu Log_Aktivity
+   * (100% zpětně kompatibilní se stávajícím sloupcem "Hodnota / Čas" i novým formátem "80 min | 168 W | 129 bpm")
+   */
+  function parseEnduranceMetrics(act) {
+    const detail = String(act.detail || '');
+    const value = String(act.value !== undefined ? act.value : '');
+    const note = String(act.note || '');
+    const combined = detail + ' ' + value + ' ' + note;
+
+    let durationMin = 0;
+    const minMatch = value.match(/(\d+(?:[.,]\d+)?)\s*min/i) || detail.match(/(\d+(?:[.,]\d+)?)\s*min/i);
+    if (minMatch) durationMin = Math.round(toNum(minMatch[1]));
+
+    let avgWatts = 0;
+    // Hledá např. "168 W" (ale ignoruje "100% MAP 360 W" pokud je tam výslovně MAP)
+    const wMatch = value.match(/(?:^|\|\s*|avg\s*)(\d+(?:[.,]\d+)?)\s*W\b/i);
+    if (wMatch && !/MAP\s*\d+\s*W/i.test(value)) {
+      avgWatts = Math.round(toNum(wMatch[1]));
+    } else if (/MAP/i.test(value)) {
+      const explicitAvg = value.match(/(\d+(?:[.,]\d+)?)\s*W\s*(?:\||$|avg)/i);
+      if (explicitAvg && value.indexOf('|') !== -1) avgWatts = Math.round(toNum(explicitAvg[1]));
+    }
+
+    let avgHr = 0;
+    const hrMatch = value.match(/(\d+(?:[.,]\d+)?)\s*(?:bpm|t\/m|HR)/i) || note.match(/(\d+(?:[.,]\d+)?)\s*(?:bpm|t\/m)/i);
+    if (hrMatch) avgHr = Math.round(toNum(hrMatch[1]));
+
+    let sport = 'Kolo';
+    if (/běh|beh|run/i.test(combined)) sport = 'Běh';
+    else if (/airbike|assault/i.test(combined)) sport = 'Airbike';
+    else if (/kompenz|dekompres|f7/i.test(combined + ' ' + (act.type || ''))) sport = 'Kompenzace';
+
+    const ef = (avgWatts > 0 && avgHr > 0) ? round2(avgWatts / avgHr) : 0;
+
+    return {
+      durationMin: durationMin,
+      avgWatts: avgWatts,
+      avgHr: avgHr,
+      sport: sport,
+      ef: ef
+    };
   }
 
   /* ==================== AUDIO, HLAS & WAKE LOCK ==================== */
@@ -260,23 +352,36 @@
     }
   };
 
+  // Reference-counted WakeLock s automatickým obnovením po návratu do okna
   let wakeLockSentinel = null;
+  const wakeLockOwners = new Set();
   const wakeLock = {
-    acquire: async function () {
+    _request: async function () {
       try {
-        if ('wakeLock' in navigator && !wakeLockSentinel) {
+        if ('wakeLock' in navigator && !wakeLockSentinel && document.visibilityState === 'visible') {
           wakeLockSentinel = await navigator.wakeLock.request('screen');
           wakeLockSentinel.addEventListener('release', function () { wakeLockSentinel = null; });
         }
       } catch (e) {}
     },
-    release: async function () {
-      try {
-        if (wakeLockSentinel) {
+    acquire: async function (owner) {
+      wakeLockOwners.add(owner || 'default');
+      await this._request();
+    },
+    release: async function (owner) {
+      if (owner) wakeLockOwners.delete(owner);
+      else wakeLockOwners.clear();
+      if (wakeLockOwners.size === 0 && wakeLockSentinel) {
+        try {
           await wakeLockSentinel.release();
-          wakeLockSentinel = null;
-        }
-      } catch (e) {}
+        } catch (e) {}
+        wakeLockSentinel = null;
+      }
+    },
+    reacquireIfNeeded: function () {
+      if (wakeLockOwners.size > 0 && !wakeLockSentinel) {
+        this._request();
+      }
     }
   };
 
@@ -286,6 +391,7 @@
     endTime: 0,
     intervalId: null,
     label: 'PAUZA',
+    _externalProvider: null, // pro zobrazení běžícího F4/F7 časovače při přepnutí záložky
     start: function (seconds, label) {
       const secs = Math.max(5, parseInt(seconds, 10) || 120);
       this.label = label || 'PAUZA';
@@ -293,8 +399,12 @@
       const el = document.getElementById('floating-timer');
       const lbl = document.getElementById('ft-label');
       if (lbl) lbl.textContent = this.label;
-      if (el) el.classList.remove('hidden');
-      wakeLock.acquire();
+      if (el) {
+        el.classList.remove('hidden');
+        el.classList.remove('ft-interval-mode');
+      }
+      document.body.classList.add('has-floating-timer');
+      wakeLock.acquire('restTimer');
       if (this.intervalId) clearInterval(this.intervalId);
       this.tick();
       this.intervalId = setInterval(() => this.tick(), 250);
@@ -326,9 +436,36 @@
         this.intervalId = null;
       }
       this.endTime = 0;
+      wakeLock.release('restTimer');
+      if (this._externalProvider && this._externalProvider.isActive()) {
+        this.syncExternalBar();
+      } else {
+        const el = document.getElementById('floating-timer');
+        if (el) el.classList.add('hidden');
+        document.body.classList.remove('has-floating-timer');
+      }
+    },
+    setExternalProvider: function (provider) {
+      this._externalProvider = provider;
+    },
+    syncExternalBar: function () {
+      if (this.endTime > 0) return; // pauzovač má přednost, pokud běží
       const el = document.getElementById('floating-timer');
-      if (el) el.classList.add('hidden');
-      wakeLock.release();
+      const lbl = document.getElementById('ft-label');
+      const timeEl = document.getElementById('ft-time');
+      if (!el) return;
+      if (this._externalProvider && this._externalProvider.shouldShowFloating()) {
+        const info = this._externalProvider.getFloatingInfo();
+        if (lbl) lbl.textContent = info.label;
+        if (timeEl) timeEl.textContent = info.timeText;
+        el.classList.add('ft-interval-mode');
+        el.classList.remove('hidden');
+        document.body.classList.add('has-floating-timer');
+      } else {
+        el.classList.remove('ft-interval-mode');
+        el.classList.add('hidden');
+        document.body.classList.remove('has-floating-timer');
+      }
     }
   };
 
@@ -362,27 +499,38 @@
 
   /* ==================== HLAVNÍ STORE OBJEKT ==================== */
 
+  let lastHiddenAt = 0;
+
   const TOS = {
     state: loadState(),
     views: {},
     _enrichedCache: null,
     _syncing: false,
+    _pulling: false,
 
     // Utility
     esc: esc,
+    dateToISO: dateToISO,
     todayISO: todayISO,
+    shiftDateISO: shiftDateISO,
     formatDateCZ: formatDateCZ,
     formatDateShortCZ: formatDateShortCZ,
     daysBetween: daysBetween,
     getISOWeekInfo: getISOWeekInfo,
     uid: uid,
     toNum: toNum,
+    round1: round1,
+    round2: round2,
     calcE1RM: calcE1RM,
     calcTonnage: calcTonnage,
     computeMachineKey: computeMachineKey,
     getCnsPriority: getCnsPriority,
     phaseIdxToSplitKey: phaseIdxToSplitKey,
     phaseIdxToCode: phaseIdxToCode,
+    isWeightedBodyweightName: isWeightedBodyweightName,
+    parseTargetSetsCount: parseTargetSetsCount,
+    parseEnduranceMetrics: parseEnduranceMetrics,
+    normalizeState: normalizeState,
 
     // Hardware & UI
     audio: audio,
@@ -391,6 +539,20 @@
     toast: toast,
     openModal: openModal,
     closeModal: closeModal,
+
+    ensureTodayReadiness: function () {
+      const today = todayISO();
+      if (this.state.ui.readinessDate !== today) {
+        this.state.ui.readiness = 'full';
+        this.state.ui.readinessDate = today;
+      }
+    },
+
+    setReadiness: function (level) {
+      this.state.ui.readiness = level;
+      this.state.ui.readinessDate = todayISO();
+      this.save();
+    },
 
     save: function () {
       this._enrichedCache = null;
@@ -407,6 +569,7 @@
     },
 
     switchTab: function (tabName) {
+      this.ensureTodayReadiness();
       this.state.ui.activeTab = tabName;
       document.querySelectorAll('.tab-view').forEach(function (sec) {
         sec.classList.toggle('active', sec.id === 'tab-' + tabName);
@@ -416,6 +579,7 @@
       });
       this.save();
       this.renderActiveTab();
+      restTimer.syncExternalBar();
       window.scrollTo({ top: 0, behavior: 'instant' });
     },
 
@@ -440,6 +604,7 @@
     renderAll: function () {
       this.updateTopbar();
       this.renderActiveTab();
+      restTimer.syncExternalBar();
     },
 
     updateTopbar: function () {
@@ -491,10 +656,6 @@
       return this.state.data.catalog.find(function (c) { return c.id === id; }) || null;
     },
 
-    /**
-     * Vrací cviky z Katalog_Cviku pro daný split (např. 'Full Body (A)', 'Upper', 'Full Body (B)')
-     * filtrované na aktuální posilovnu + všechny Volné váhy, seřazené podle Priorita_CNS.
-     */
     getExercisesForSplit: function (splitKey, gymId) {
       const gId = gymId !== undefined ? gymId : this.state.ui.activeGymId;
       return this.state.data.catalog
@@ -516,68 +677,109 @@
 
     /**
      * Vrací obohacenou historii všech silových sérií s přísnou izolací přes Stroj_Gym_Klic:
-     * - isProgress (překonání minulé stejné série na stejném stroji/fitku)
-     * - isPR (absolutní maximum e1RM — nebo opakování u vlastní váhy — na daném Stroj_Gym_Klic)
-     * - weekKey (YYYY - TWW)
-     * - isUniqueSession (první záznam daného dne + splitu)
+     * - správná podpora cviků s vlastní váhou i s přídavnou zátěží (BW + kg -> efektivní 1RM)
+     * - isProgress: překonání nejlepší série z PŘEDCHOZÍHO tréninkového dne (nikoli v rámci téhož dne)
+     * - isPR: striktní překonání dosavadního historického maxima (ne opakované vyrovnání)
+     * - isAllTimeBest: nejlepší záznam historie daného stroje (pro Síň slávy)
      */
     getEnrichedLogs: function () {
       if (this._enrichedCache) return this._enrichedCache;
 
+      const bw = Math.max(0, toNum(this.state.settings.bodyweight));
       const logs = this.state.data.strengthLogs.slice().sort(function (a, b) {
         if (a.date !== b.date) return String(a.date).localeCompare(String(b.date));
         return (a.rowNumber || 0) - (b.rowNumber || 0);
       });
 
-      const lastByMachineAndType = {};
-      const maxScoreByMachine = {};
-      const seenSession = {};
-
-      // První průchod: absolutní maximum na každý Stroj_Gym_Klic
+      // Detekce cviků, kde se kombinuje vlastní váha (0 kg) a přídavná zátěž (> 0 kg), nebo jde o dipy/shyby
+      const keyStats = {};
       logs.forEach(function (l) {
         const key = l.machineKey || l.exerciseName;
-        const score = l.weight > 0 ? (l.e1rm || calcE1RM(l.weight, l.reps)) : l.reps;
-        if (score > 0 && (!maxScoreByMachine[key] || score > maxScoreByMachine[key])) {
-          maxScoreByMachine[key] = score;
-        }
+        if (!keyStats[key]) keyStats[key] = { hasZero: false, hasPos: false, isBwNamed: isWeightedBodyweightName(l.exerciseName) };
+        if (toNum(l.weight) <= 0) keyStats[key].hasZero = true;
+        else keyStats[key].hasPos = true;
       });
 
-      // Druhý průchod: chronologický progres, PR, týden a unikátní trénink
-      const enriched = logs.map(function (l) {
+      const usesCombinedBW = {};
+      Object.keys(keyStats).forEach(function (k) {
+        const st = keyStats[k];
+        // Pokud má cvik jak 0 kg tak +kg, nebo je pojmenován jako dipy/shyby a má +kg, započteme BW
+        usesCombinedBW[k] = bw > 0 && ((st.hasZero && st.hasPos) || (st.isBwNamed && st.hasPos));
+      });
+
+      const runningMaxByMachine = {};
+      const bestIndexByMachine = {};
+      const bestScoreByMachine = {};
+      const prevSessionBest = {};   // nejlepší skóre ze všech PŘEDCHOZÍCH dnů pro (machineKey || setType)
+      const currentDayBest = {};    // průběžně sbírané maximum pro aktuálně zpracovávaný den
+      const currentDayDate = {};
+      const seenSession = {};
+
+      const enriched = logs.map(function (l, idx) {
         const key = l.machineKey || l.exerciseName;
         const setType = l.setType || 'Top Set';
         const pairKey = key + '||' + setType;
-        const isBW = toNum(l.weight) <= 0;
-        const e1rm = isBW ? 0 : (l.e1rm || calcE1RM(l.weight, l.reps));
-        const score = isBW ? toNum(l.reps) : e1rm;
+        const w = Math.max(0, toNum(l.weight));
+        const r = Math.max(0, toNum(l.reps));
+        const isPureBW = !usesCombinedBW[key] && w <= 0;
+        const usesBW = !!usesCombinedBW[key];
 
-        const prev = lastByMachineAndType[pairKey] || null;
-        let isProgress = false;
-        if (prev && score > 0) {
-          const prevScore = isBW ? toNum(prev.reps) : (prev.e1rm || calcE1RM(prev.weight, prev.reps));
-          if (score > prevScore) isProgress = true;
+        const effWeight = usesBW ? round1(bw + w) : w;
+        const e1rm = isPureBW ? 0 : calcE1RM(effWeight, r);
+        const score = isPureBW ? r : e1rm;
+
+        // Uzavřít předchozí den při přechodu na nové datum
+        if (currentDayDate[pairKey] && currentDayDate[pairKey] !== l.date) {
+          prevSessionBest[pairKey] = currentDayBest[pairKey];
+          currentDayBest[pairKey] = 0;
         }
-        lastByMachineAndType[pairKey] = l;
+        currentDayDate[pairKey] = l.date;
 
-        const isPR = score > 0 && score >= (maxScoreByMachine[key] || 0);
+        const prevBest = prevSessionBest[pairKey] || 0;
+        const isProgress = prevBest > 0 && score > prevBest;
+        if (score > (currentDayBest[pairKey] || 0)) {
+          currentDayBest[pairKey] = score;
+        }
+
+        // Striktní chronologické PR (pouze při překonání dosavadního maxima z předchozích záznamů)
+        const prevMax = runningMaxByMachine[key] || 0;
+        const isPR = score > 0 && prevMax > 0 && score > prevMax;
+        if (score > prevMax) {
+          runningMaxByMachine[key] = score;
+        }
+
+        // Sledování absolutního rekordu pro Síň slávy (při rovnosti vyhrává novější záznam)
+        if (score > 0 && score >= (bestScoreByMachine[key] || 0)) {
+          bestScoreByMachine[key] = score;
+          bestIndexByMachine[key] = idx;
+        }
+
         const wk = getISOWeekInfo(l.date);
         const sessKey = l.date + '||' + (l.split || '');
         const isUniqueSession = !seenSession[sessKey];
         seenSession[sessKey] = true;
 
         let perfText = '';
-        if (isBW) {
-          perfText = 'Vlastní váha × ' + l.reps + (l.rir !== '' ? ' (RIR ' + l.rir + ')' : '');
+        if (w <= 0) {
+          perfText = 'Vlastní váha × ' + r + (l.rir !== '' ? ' (RIR ' + l.rir + ')' : '');
+        } else if (usesBW) {
+          perfText = 'BW +' + w + ' kg × ' + r + (l.rir !== '' ? ' (RIR ' + l.rir + ')' : '');
         } else {
-          perfText = l.weight + ' kg × ' + l.reps + (l.rir !== '' ? ' (RIR ' + l.rir + ')' : '');
+          perfText = w + ' kg × ' + r + (l.rir !== '' ? ' (RIR ' + l.rir + ')' : '');
         }
 
         return Object.assign({}, l, {
+          weight: w,
+          reps: r,
+          effectiveWeight: effWeight,
           e1rm: e1rm,
-          tonnage: l.tonnage || calcTonnage(l.weight, l.reps),
-          isBW: isBW,
+          tonnage: l.tonnage || calcTonnage(w, r),
+          isBW: isPureBW,
+          usesBW: usesBW,
+          score: score,
           isProgress: isProgress,
           isPR: isPR,
+          isAllTimeBest: false,
           weekKey: wk.key,
           weekYear: wk.year,
           weekNum: wk.week,
@@ -586,15 +788,21 @@
         });
       });
 
+      Object.keys(bestIndexByMachine).forEach(function (k) {
+        const i = bestIndexByMachine[k];
+        if (enriched[i]) enriched[i].isAllTimeBest = true;
+      });
+
       this._enrichedCache = enriched;
       return enriched;
     },
 
-    getLastSetForMachine: function (machineKey, setType) {
+    getLastSetForMachine: function (machineKey, setType, excludeDate) {
       const logs = this.getEnrichedLogs();
       const targetType = setType || 'Top Set';
       for (let i = logs.length - 1; i >= 0; i--) {
         if (logs[i].machineKey === machineKey && logs[i].setType === targetType) {
+          if (excludeDate && logs[i].date === excludeDate) continue;
           return logs[i];
         }
       }
@@ -606,22 +814,28 @@
       let best = null;
       logs.forEach(function (l) {
         if (l.machineKey !== machineKey) return;
-        const score = l.isBW ? l.reps : l.e1rm;
-        const bestScore = best ? (best.isBW ? best.reps : best.e1rm) : -1;
-        if (score > bestScore) best = l;
+        const sc = l.score || 0;
+        const bestSc = best ? (best.score || 0) : -1;
+        if (sc > bestSc || (sc === bestSc && best && l.date >= best.date)) best = l;
       });
       return best;
     },
 
     /**
-     * Stav regenerace (48h / 72h+) pro Upper a Lower/Full Body + týdenní frekvence
+     * Hybridní stav regenerace (48h / 72h+) pro Upper a Lower/Full Body + týdenní frekvence (bezpečné přes přelom roku!)
+     * Zohledňuje jak silové tréninky, tak těžké vytrvalostní jednotky (VO2max F4 zatěžuje nohy & CNS).
      */
     getRecoveryStatus: function () {
       const logs = this.getEnrichedLogs();
+      const activities = this.state.data.activityLogs || [];
       const today = todayISO();
+
       let lastUpperDate = '';
       let lastLowerDate = '';
+      let lastLowerSource = '';
       let lastAny = null;
+      let lastVo2Date = '';
+      let lastZ2Date = '';
 
       logs.forEach(function (l) {
         if (!l.date) return;
@@ -629,36 +843,105 @@
         if ((sp === 'Upper' || sp.indexOf('Full Body') !== -1) && l.date > lastUpperDate) {
           lastUpperDate = l.date;
         }
-        if ((sp === 'Lower' || sp.indexOf('Full Body') !== -1) && l.date > lastLowerDate) {
+        if ((sp === 'Lower' || sp.indexOf('Full Body') !== -1) && l.date >= lastLowerDate) {
           lastLowerDate = l.date;
+          lastLowerSource = sp;
         }
         if (!lastAny || l.date >= lastAny.date) lastAny = l;
       });
 
-      function classify(lastDate) {
-        if (!lastDate) return { days: null, date: '', label: 'Bez záznamu', level: 'muted' };
-        const d = daysBetween(lastDate, today);
-        if (d >= 3) return { days: d, date: lastDate, label: 'Plně zregenerováno (72h+)', level: 'green' };
-        if (d === 2) return { days: d, date: lastDate, label: 'Probíhá obnova (48h)', level: 'gold' };
-        return { days: d, date: lastDate, label: 'Akutní únava po zátěži', level: 'red' };
-      }
-
-      const nowWk = getISOWeekInfo(today);
-      let w0 = 0, w1 = 0, w2 = 0;
-      logs.forEach(function (l) {
-        if (!l.isUniqueSession) return;
-        if (l.weekYear === nowWk.year) {
-          if (l.weekNum === nowWk.week) w0++;
-          else if (l.weekNum === nowWk.week - 1) w1++;
-          else if (l.weekNum === nowWk.week - 2) w2++;
+      activities.forEach(function (a) {
+        if (!a.date) return;
+        const t = String(a.type || '').toLowerCase();
+        const ph = String(a.phase || '').toUpperCase();
+        if (t.indexOf('vo2') !== -1 || ph === 'F4') {
+          if (a.date > lastVo2Date) lastVo2Date = a.date;
+          if (a.date >= lastLowerDate) {
+            lastLowerDate = a.date;
+            lastLowerSource = 'F4 VO2max';
+          }
+        } else if (t.indexOf('z2') !== -1 || ph === 'F2') {
+          if (a.date > lastZ2Date) lastZ2Date = a.date;
         }
       });
 
+      function classify(lastDate, source) {
+        if (!lastDate) return { days: null, date: '', source: '', label: 'Bez záznamu', level: 'muted' };
+        const d = daysBetween(lastDate, today);
+        if (d >= 3) return { days: d, date: lastDate, source: source, label: 'Plně zregenerováno (72h+)', level: 'green' };
+        if (d === 2) return { days: d, date: lastDate, source: source, label: 'Probíhá obnova (48h)', level: 'gold' };
+        return { days: d, date: lastDate, source: source, label: 'Akutní únava po zátěži', level: 'red' };
+      }
+
+      // Přesné ISO týdny bez chyby na přelomu roku 2026 -> 2027
+      const wk0Key = getISOWeekInfo(today).key;
+      const wk1Key = getISOWeekInfo(shiftDateISO(today, -7)).key;
+      const wk2Key = getISOWeekInfo(shiftDateISO(today, -14)).key;
+
+      let w0 = 0, w1 = 0, w2 = 0;
+      logs.forEach(function (l) {
+        if (!l.isUniqueSession) return;
+        if (l.weekKey === wk0Key) w0++;
+        else if (l.weekKey === wk1Key) w1++;
+        else if (l.weekKey === wk2Key) w2++;
+      });
+
       return {
-        upper: classify(lastUpperDate),
-        lower: classify(lastLowerDate),
+        upper: classify(lastUpperDate, 'Síla'),
+        lower: classify(lastLowerDate, lastLowerSource),
+        lastVo2Date: lastVo2Date,
+        lastZ2Date: lastZ2Date,
         weeklyCounts: { thisWeek: w0, lastWeek: w1, twoWeeksAgo: w2 },
         lastSession: lastAny
+      };
+    },
+
+    /**
+     * Chytrý návrh další fáze (F1–F7) podle posledního zapsaného tréninku (síla nebo aktivita)
+     */
+    getSuggestedNextPhase: function () {
+      const today = todayISO();
+      let latest = null; // { date, phaseIdx, label }
+
+      function consider(date, phaseIdx, label) {
+        if (!date || phaseIdx < 0 || phaseIdx > 6) return;
+        if (!latest || date > latest.date || (date === latest.date && phaseIdx > latest.phaseIdx)) {
+          latest = { date: date, phaseIdx: phaseIdx, label: label };
+        }
+      }
+
+      this.state.data.strengthLogs.forEach(function (l) {
+        if (!l.date) return;
+        const sp = String(l.split || '');
+        if (sp === 'Full Body (A)') consider(l.date, 0, 'F1 Full Body A');
+        else if (sp === 'Upper') consider(l.date, 2, 'F3 Upper');
+        else if (sp === 'Full Body (B)') consider(l.date, 5, 'F6 Full Body B');
+      });
+
+      (this.state.data.activityLogs || []).forEach(function (a) {
+        if (!a.date) return;
+        const t = String(a.type || '').toLowerCase();
+        if (t.indexOf('big3') !== -1) return; // Big 3 je denní rutina, neposouvá F1–F7
+        const ph = String(a.phase || '').toUpperCase();
+        const m = ph.match(/^F([1-7])$/);
+        if (m) {
+          const idx = parseInt(m[1], 10) - 1;
+          consider(a.date, idx, a.detail || ph);
+        } else if (t.indexOf('z2') !== -1) consider(a.date, 1, 'F2 Zóna 2');
+        else if (t.indexOf('vo2') !== -1) consider(a.date, 3, 'F4 VO2max');
+        else if (t.indexOf('flush') !== -1) consider(a.date, 4, 'F5 Flush');
+        else if (t.indexOf('kompenz') !== -1) consider(a.date, 6, 'F7 Kompenzace');
+      });
+
+      if (!latest) return null;
+      const daysAgo = daysBetween(latest.date, today);
+      const nextIdx = latest.date === today ? latest.phaseIdx : ((latest.phaseIdx + 1) % 7);
+      return {
+        lastDate: latest.date,
+        daysAgo: daysAgo,
+        lastPhaseIdx: latest.phaseIdx,
+        lastLabel: latest.label,
+        nextPhaseIdx: nextIdx
       };
     },
 
@@ -681,12 +964,13 @@
       const resType = cat ? cat.resistanceType : (payload.gymId ? 'Stroj/Kladka' : 'Volna_Vaha');
       const machineKey = computeMachineKey(resType, gymName, exName);
       const setType = payload.setType === 'Back-off Set' ? 'Back-off Set' : 'Top Set';
-      const weight = toNum(payload.weight);
-      const reps = toNum(payload.reps);
+      const weight = Math.max(0, toNum(payload.weight));
+      const reps = Math.max(1, Math.round(toNum(payload.reps)));
       const e1rm = calcE1RM(weight, reps);
       const tonnage = calcTonnage(weight, reps);
+      const dateStr = payload.date || todayISO();
 
-      const prev = this.getLastSetForMachine(machineKey, setType);
+      const prev = this.getLastSetForMachine(machineKey, setType, dateStr);
       const prevPerformance = prev
         ? (prev.isBW ? ('Vlastní váha × ' + prev.reps) : (prev.weight + ' kg × ' + prev.reps + ' (1RM: ' + prev.e1rm + ' kg)'))
         : '';
@@ -694,11 +978,12 @@
       const id = uid('s');
       const maxRow = this.state.data.strengthLogs.reduce(function (m, l) { return Math.max(m, l.rowNumber || 0); }, 1000);
       const setupNote = String(payload.setupNote || '').trim();
+      const readiness = payload.readiness || this.state.ui.readiness || 'full';
 
       const record = {
         id: id,
         rowNumber: maxRow + 1,
-        date: payload.date || todayISO(),
+        date: dateStr,
         gymId: payload.gymId || (cat ? cat.gymId : '') || '',
         gymName: gymName,
         split: payload.split || (cat ? cat.split : '') || '',
@@ -714,7 +999,8 @@
         prevPerformance: prevPerformance,
         e1rm: e1rm,
         tonnage: tonnage,
-        setupNote: setupNote
+        setupNote: setupNote,
+        readiness: readiness
       };
 
       this.state.data.strengthLogs.push(record);
@@ -743,7 +1029,8 @@
         prevPerformance: record.prevPerformance,
         e1rm: record.e1rm,
         tonnage: record.tonnage,
-        setupNote: record.setupNote
+        setupNote: record.setupNote,
+        readiness: record.readiness
       });
 
       this.renderActiveTab();
@@ -755,8 +1042,8 @@
       if (idx === -1) return false;
       const rec = this.state.data.strengthLogs[idx];
 
-      if (patch.weight !== undefined) rec.weight = toNum(patch.weight);
-      if (patch.reps !== undefined) rec.reps = toNum(patch.reps);
+      if (patch.weight !== undefined) rec.weight = Math.max(0, toNum(patch.weight));
+      if (patch.reps !== undefined) rec.reps = Math.max(1, Math.round(toNum(patch.reps)));
       if (patch.rir !== undefined) rec.rir = String(patch.rir);
       if (patch.setType !== undefined) rec.setType = patch.setType === 'Back-off Set' ? 'Back-off Set' : 'Top Set';
       if (patch.setupNote !== undefined) {
@@ -774,6 +1061,8 @@
         reps: rec.reps,
         rir: rec.rir,
         setType: rec.setType,
+        e1rm: rec.e1rm,
+        tonnage: rec.tonnage,
         setupNote: rec.setupNote
       });
 
@@ -832,16 +1121,49 @@
     updateExerciseSetup: function (exerciseId, patch) {
       const cat = this.getCatalogById(exerciseId);
       if (!cat) return false;
+      if (patch.name !== undefined && String(patch.name).trim()) cat.name = String(patch.name).trim();
+      if (patch.muscle !== undefined) cat.muscle = String(patch.muscle).trim();
+      if (patch.pattern !== undefined) {
+        cat.pattern = String(patch.pattern).trim();
+        cat.cnsPriority = getCnsPriority(cat.pattern);
+      }
+      if (patch.resistanceType !== undefined) {
+        cat.resistanceType = patch.resistanceType === 'Volna_Vaha' ? 'Volna_Vaha' : 'Stroj/Kladka';
+        if (cat.resistanceType === 'Volna_Vaha') {
+          cat.gymId = '';
+          cat.gymName = '';
+        }
+      }
+      if (patch.gymId !== undefined && cat.resistanceType !== 'Volna_Vaha') {
+        cat.gymId = String(patch.gymId).trim();
+        const g = this.getGymById(cat.gymId);
+        cat.gymName = g ? g.name : '';
+      }
+      if (patch.targetSplits !== undefined && Array.isArray(patch.targetSplits)) {
+        cat.targetSplits = patch.targetSplits;
+        if (patch.targetSplits.length) cat.split = patch.targetSplits[0];
+      }
       if (patch.machineSetup !== undefined) cat.machineSetup = String(patch.machineSetup).trim();
       if (patch.biomechanics !== undefined) cat.biomechanics = String(patch.biomechanics).trim();
+      if (patch.safetyProtocol !== undefined) cat.safetyProtocol = String(patch.safetyProtocol).trim();
       if (patch.targetSetsReps !== undefined) cat.targetSetsReps = String(patch.targetSetsReps).trim();
       if (patch.targetRir !== undefined) cat.targetRir = String(patch.targetRir).trim();
+
+      cat.machineKey = computeMachineKey(cat.resistanceType, cat.gymName, cat.name);
 
       this.enqueue({
         action: 'update_setup',
         exerciseId: exerciseId,
+        name: cat.name,
+        muscle: cat.muscle,
+        pattern: cat.pattern,
+        resistanceType: cat.resistanceType,
+        gymId: cat.gymId,
+        targetSplits: cat.targetSplits,
+        split: cat.split,
         machineSetup: cat.machineSetup,
         biomechanics: cat.biomechanics,
+        safetyProtocol: cat.safetyProtocol,
         targetSetsReps: cat.targetSetsReps,
         targetRir: cat.targetRir
       });
@@ -869,12 +1191,22 @@
       return gym;
     },
 
+    _rebuildBig3Dates: function () {
+      const set = new Set();
+      (this.state.data.activityLogs || []).forEach(function (a) {
+        if (String(a.type || '').toLowerCase().indexOf('big3') !== -1 && a.date) {
+          set.add(a.date);
+        }
+      });
+      this.state.data.big3Dates = Array.from(set).sort();
+    },
+
     logActivity: function (payload) {
-   const dateStr = payload.date || todayISO();
-   const item = {
-     id: payload.id || uid('act'),
-     timestamp: new Date().toISOString(),
-     date: dateStr,
+      const dateStr = payload.date || todayISO();
+      const item = {
+        id: payload.id || uid('act'),
+        timestamp: new Date().toISOString(),
+        date: dateStr,
         type: payload.type || 'activity',
         phase: payload.phase || phaseIdxToCode(this.state.ui.currentPhaseIdx),
         detail: payload.detail || '',
@@ -882,6 +1214,13 @@
         readiness: payload.readiness || this.state.ui.readiness,
         note: payload.note || ''
       };
+      // Deduplikace Big 3 ve stejný den lokálně
+      if (String(item.type).toLowerCase().indexOf('big3') !== -1) {
+        const exists = this.state.data.activityLogs.some(function (a) {
+          return a.date === dateStr && String(a.type || '').toLowerCase().indexOf('big3') !== -1;
+        });
+        if (exists) return item;
+      }
       this.state.data.activityLogs.push(item);
       if (String(item.type).toLowerCase().indexOf('big3') !== -1) {
         if (this.state.data.big3Dates.indexOf(dateStr) === -1) {
@@ -894,7 +1233,55 @@
       return item;
     },
 
-    /* ==================== SYNCHRONIZACE S API v2.0 ==================== */
+    updateActivity: function (id, patch) {
+      const idx = this.state.data.activityLogs.findIndex(function (a) { return a.id === id; });
+      if (idx === -1) return false;
+      const rec = this.state.data.activityLogs[idx];
+      if (patch.date !== undefined) rec.date = patch.date;
+      if (patch.type !== undefined) rec.type = patch.type;
+      if (patch.phase !== undefined) rec.phase = patch.phase;
+      if (patch.detail !== undefined) rec.detail = String(patch.detail).trim();
+      if (patch.value !== undefined) rec.value = patch.value;
+      if (patch.readiness !== undefined) rec.readiness = patch.readiness;
+      if (patch.note !== undefined) rec.note = String(patch.note).trim();
+
+      this.enqueue({
+        action: 'update_activity',
+        id: id,
+        date: rec.date,
+        type: rec.type,
+        phase: rec.phase,
+        detail: rec.detail,
+        value: rec.value,
+        readiness: rec.readiness,
+        note: rec.note
+      });
+      this.renderActiveTab();
+      return true;
+    },
+
+    deleteActivity: function (id, dateStr, typeHint) {
+      const isBig3 = String(typeHint || '').toLowerCase().indexOf('big3') !== -1 || (!id && !!dateStr);
+      this.state.data.activityLogs = this.state.data.activityLogs.filter(function (a) {
+        if (id && a.id === id) return false;
+        if (!id && dateStr && a.date === dateStr && String(a.type || '').toLowerCase().indexOf('big3') !== -1) return false;
+        return true;
+      });
+      if (isBig3 && dateStr) {
+        this.state.data.big3Dates = this.state.data.big3Dates.filter(function (d) { return d !== dateStr; });
+      } else {
+        this._rebuildBig3Dates();
+      }
+      this.enqueue({
+        action: 'delete_activity',
+        id: id || '',
+        date: dateStr || '',
+        type: typeHint || ''
+      });
+      this.renderActiveTab();
+    },
+
+    /* ==================== SYNCHRONIZACE S API v2.1 ==================== */
 
     pushOutbox: async function (silent) {
       const url = (this.state.settings.apiUrl || '').trim();
@@ -907,23 +1294,31 @@
       if (this._syncing) return { ok: false, busy: true };
 
       this._syncing = true;
-      const batch = this.state.outbox.slice();
-      try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({ token: token, items: batch })
-        });
-        const json = await res.json();
-        if (json.status !== 'ok') throw new Error(json.message || 'Chyba zápisu API');
+      let totalSent = 0;
+      let lastJson = null;
 
-        // Odstranit z fronty pouze úspěšně odeslanou dávku
-        this.state.outbox = this.state.outbox.slice(batch.length);
-        this.state.ui.lastSyncAt = new Date().toISOString();
-        this.state.ui.syncStatus = this.state.outbox.length ? 'pending' : 'online';
-        this.save();
-        if (!silent) toast('Odesláno do Sheetu: ' + (json.saved || batch.length) + ' změn');
-        return { ok: true, sent: batch.length, response: json };
+      try {
+        // Smyčka zaručí, že se odešlou i položky přidané během probíhajícího požadavku
+        while (this.state.outbox.length > 0) {
+          const batch = this.state.outbox.slice();
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({ token: token, items: batch })
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const json = await res.json();
+          if (json.status !== 'ok') throw new Error(json.message || 'Chyba zápisu API');
+
+          this.state.outbox = this.state.outbox.slice(batch.length);
+          totalSent += (json.saved !== undefined ? json.saved : batch.length);
+          lastJson = json;
+          this.state.ui.lastSyncAt = new Date().toISOString();
+          this.state.ui.syncStatus = this.state.outbox.length ? 'pending' : 'online';
+          this.save();
+        }
+        if (!silent) toast('Odesláno do Sheetu: ' + totalSent + ' změn');
+        return { ok: true, sent: totalSent, response: lastJson };
       } catch (err) {
         this.state.ui.syncStatus = 'error';
         this.save();
@@ -945,14 +1340,31 @@
         if (!silent) toast('Jsi offline — zobrazuji lokální data.');
         return { ok: false, offline: true };
       }
+      if (this._pulling || this._syncing) {
+        return { ok: false, busy: true };
+      }
+      // Nikdy nepřepisovat lokální data, pokud čekají neodeslané položky ve frontě
+      if (this.state.outbox.length > 0) {
+        if (!silent) toast('Ve frontě čekají neodeslané změny — nejdřív odešli frontu.');
+        return { ok: false, pendingOutbox: true };
+      }
 
+      this._pulling = true;
       const sep = baseUrl.indexOf('?') !== -1 ? '&' : '?';
       const url = token ? (baseUrl + sep + 'token=' + encodeURIComponent(token)) : baseUrl;
 
       try {
         const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const json = await res.json();
         if (json.status !== 'ok') throw new Error(json.message || 'API nevrátilo status ok');
+
+        // Pokud mezitím uživatel za běhu fetch něco zapsal, nepřepisuj lokální stav
+        if (this.state.outbox.length > 0) {
+          this.state.ui.syncStatus = 'pending';
+          this.save();
+          return { ok: true, deferredOverwrite: true };
+        }
 
         if (Array.isArray(json.schedule) && json.schedule.length) this.state.data.schedule = json.schedule;
         if (json.strength) this.state.data.planStrength = json.strength;
@@ -979,6 +1391,8 @@
         this.save();
         if (!silent) toast('Chyba synchronizace: ' + err.message, 3600);
         return { ok: false, error: err.message };
+      } finally {
+        this._pulling = false;
       }
     },
 
@@ -1065,14 +1479,33 @@
         TOS.syncAll(false);
       });
 
-      // Plovoucí pauzovač
+      // Plovoucí pauzovač (i návrat do běžícího intervalového časovače)
+      const ftBar = document.getElementById('floating-timer');
+      if (ftBar) {
+        ftBar.addEventListener('click', function (e) {
+          if (e.target.closest('button')) return;
+          if (ftBar.classList.contains('ft-interval-mode') && restTimer._externalProvider) {
+            restTimer._externalProvider.focusTimer();
+          }
+        });
+      }
       document.querySelectorAll('[data-timer-delta]').forEach(function (btn) {
         btn.addEventListener('click', function () {
-          restTimer.adjust(parseInt(btn.dataset.timerDelta, 10));
+          if (restTimer.endTime > 0) {
+            restTimer.adjust(parseInt(btn.dataset.timerDelta, 10));
+          } else if (restTimer._externalProvider && restTimer._externalProvider.isActive()) {
+            restTimer._externalProvider.focusTimer();
+          }
         });
       });
       const stopBtn = document.getElementById('ft-stop');
-      if (stopBtn) stopBtn.addEventListener('click', function () { restTimer.stop(); });
+      if (stopBtn) stopBtn.addEventListener('click', function () {
+        if (restTimer.endTime > 0) {
+          restTimer.stop();
+        } else if (restTimer._externalProvider && restTimer._externalProvider.isActive()) {
+          restTimer._externalProvider.stop();
+        }
+      });
 
       // Modální okno
       const closeBtn = document.getElementById('modal-close');
@@ -1089,9 +1522,22 @@
         if (TOS.state.outbox.length > 0) TOS.pushOutbox(true);
       });
 
+      // Obnovení WakeLock + tichý auto-sync při návratu do okna (např. z externí Big 3 aplikace)
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') {
+          lastHiddenAt = Date.now();
+          return;
+        }
+        wakeLock.reacquireIfNeeded();
+        TOS.ensureTodayReadiness();
+        if (lastHiddenAt && (Date.now() - lastHiddenAt) > 10000 && navigator.onLine && TOS.state.settings.apiUrl && TOS.state.settings.apiToken) {
+          TOS.syncAll(true);
+        }
+      });
+
       // Aktivovat uloženou záložku a stáhnout čerstvá data na pozadí
       this.switchTab(this.state.ui.activeTab || 'workout');
-      if (navigator.onLine && this.state.settings.apiUrl) {
+      if (navigator.onLine && this.state.settings.apiUrl && this.state.settings.apiToken) {
         this.syncAll(true);
       }
     }

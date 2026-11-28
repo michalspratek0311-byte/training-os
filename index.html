@@ -2,14 +2,14 @@
 <html lang="cs">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0b0f17">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Training OS — Week Split 2026/7</title>
   <link rel="manifest" href="manifest.json">
-<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-512.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-512.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -47,15 +47,15 @@
       <section id="tab-settings" class="tab-view"></section>
     </main>
 
-    <!-- Plovoucí lišta pauzovače -->
+    <!-- Plovoucí lišta pauzovače / běžícího intervalového časovače -->
     <div id="floating-timer" class="floating-timer hidden">
       <div class="ft-info">
         <span class="ft-label" id="ft-label">PAUZA</span>
         <span class="ft-time" id="ft-time">02:00</span>
       </div>
       <div class="ft-actions">
-        <button type="button" class="ft-btn" data-timer-delta="-15">-15s</button>
-        <button type="button" class="ft-btn" data-timer-delta="30">+30s</button>
+        <button type="button" class="ft-btn ft-delta" data-timer-delta="-15">-15s</button>
+        <button type="button" class="ft-btn ft-delta" data-timer-delta="30">+30s</button>
         <button type="button" class="ft-btn ft-stop" id="ft-stop">Stop</button>
       </div>
     </div>
@@ -114,14 +114,24 @@
   <script src="js/workout.js"></script>
   <script src="js/big3.js"></script>
   <script src="js/analytics.js"></script>
-<script>
-  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-    window.addEventListener('load', function () {
-      navigator.serviceWorker.register('./sw.js').catch(function (err) {
-        console.warn('SW registrace selhala:', err);
+  <script>
+    if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('./sw.js').then(function (reg) {
+          reg.addEventListener('updatefound', function () {
+            const newWorker = reg.installing;
+            if (!newWorker) return;
+            newWorker.addEventListener('statechange', function () {
+              if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                if (window.TOS) window.TOS.toast('Nová verze aplikace je připravena — obnov stránku.', 4500);
+              }
+            });
+          });
+        }).catch(function (err) {
+          console.warn('SW registrace selhala:', err);
+        });
       });
-    });
-  }
-</script>
+    }
+  </script>
 </body>
 </html>

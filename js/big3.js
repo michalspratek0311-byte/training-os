@@ -1,10 +1,9 @@
 /**
- * Training OS v2.0 — Záložka Warm-up & Big 3 (přehled z Log_Aktivity + spouštěč samostatné McGill Big 3 + RAM Warm-up)
+ * Training OS v2.1 — Záložka Warm-up & Big 3 (přehled z Log_Aktivity + zpětný zápis/zrušení + RAM Warm-up)
  */
 (function () {
   'use strict';
 
-  // URL tvé samostatné aplikace McGill Big 3 (pokud běží v jiném podrepozitáři, uprav cestu)
   const EXTERNAL_BIG3_URL = 'https://michalspratek0311-byte.github.io/';
   const WARMUP_STORAGE_KEY = 'training_os_warmup_checks';
 
@@ -44,7 +43,14 @@
         const iso = toISO(d);
         const done = doneSet.has(iso);
         if (done) count++;
-        days.push({ label: labels[i], dayNum: d.getDate(), iso: iso, isToday: iso === today, done: done });
+        days.push({
+          label: labels[i],
+          dayNum: d.getDate(),
+          iso: iso,
+          isToday: iso === today,
+          isFuture: iso > today,
+          done: done
+        });
       }
       weeks.push({
         title: w === 0 ? 'Tento týden' : (w === -1 ? 'Minulý týden' : ('Před ' + Math.abs(w) + ' týdny')),
@@ -88,12 +94,35 @@
     } catch (e) {}
   }
 
+  function toggleBig3Date(iso, curPhaseCode) {
+    const doneSet = new Set(TOS.state.data.big3Dates || []);
+    if (doneSet.has(iso)) {
+      if (confirm('Zrušit záznam McGill Big 3 pro ' + TOS.formatDateCZ(iso) + '?')) {
+        TOS.deleteActivity('', iso, 'big3');
+        TOS.toast('Big 3 zrušeno (' + TOS.formatDateShortCZ(iso) + ')');
+      }
+    } else {
+      TOS.logActivity({
+        id: 'big3_' + iso,
+        date: iso,
+        type: 'big3',
+        phase: curPhaseCode,
+        detail: 'McGill Big 3 (ruční zápis)',
+        value: 'hotovo'
+      });
+      TOS.toast('McGill Big 3 zapsáno (' + TOS.formatDateShortCZ(iso) + ')');
+    }
+  }
+
   function renderBig3(container) {
     const weeks = getLast4Weeks();
     const thisWeek = weeks[0];
     const streak = calcBig3Streak();
     const today = TOS.todayISO();
-    const todayDone = (TOS.state.data.big3Dates || []).indexOf(today) !== -1;
+    const yesterday = TOS.shiftDateISO(today, -1);
+    const doneSet = new Set(TOS.state.data.big3Dates || []);
+    const todayDone = doneSet.has(today);
+    const yesterdayDone = doneSet.has(yesterday);
 
     const checks = loadWarmupChecks();
     const checkedCount = RAM_WARMUP_ITEMS.filter(function (it) { return !!checks[it.id]; }).length;
@@ -102,7 +131,7 @@
 
     let html = '';
 
-    // 1. Karta McGill Big 3 — stav, přímé spuštění a 4týdenní historie
+    // 1. Karta McGill Big 3 — stav, přímé spuštění, interaktivní týden a 4týdenní historie
     html +=
       '<div class="card">' +
         '<div class="card-header">' +
@@ -112,21 +141,28 @@
           '</div>' +
           (todayDone ? '<span class="badge badge-green">Dnes splněno</span>' : '<span class="badge badge-gold">Dnes čeká</span>') +
         '</div>' +
-        '<div class="cal-grid" style="margin-bottom:12px">' +
+        '<div class="cal-grid" style="margin-bottom:8px">' +
           thisWeek.days.map(function (d) {
-            return '<div class="cal-cell ' + (d.isToday ? 'today' : '') + '" style="' + (d.done ? 'background:var(--green-soft);border-color:rgba(16,185,129,0.5)' : '') + '">' +
+            const canToggle = !d.isFuture;
+            return '<button type="button" class="cal-cell ' + (d.isToday ? 'today' : '') + '" ' +
+              (canToggle ? ('data-b3-toggle="' + d.iso + '" style="cursor:pointer;') : 'disabled style="opacity:0.45;cursor:default;') +
+              (d.done ? 'background:var(--green-soft);border-color:rgba(16,185,129,0.5)' : '') + '">' +
               '<span class="small muted">' + d.label + '</span>' +
               '<strong class="tabular">' + d.dayNum + '</strong>' +
               '<span style="font-size:12px;font-weight:800;color:' + (d.done ? 'var(--green)' : 'var(--text-dim)') + '">' + (d.done ? '✓' : '·') + '</span>' +
-            '</div>';
+            '</button>';
           }).join('') +
         '</div>' +
+        '<div class="small muted" style="margin-bottom:10px">Tip: kliknutím na libovolný den výše můžeš Big 3 dopsat zpětně nebo zrušit. Po návratu z externí appky proběhne tichý auto-sync.</div>' +
         '<div class="grid-2">' +
           '<a href="' + TOS.esc(EXTERNAL_BIG3_URL) + '" target="_blank" rel="noopener" class="btn btn-primary" style="text-decoration:none">Otevřít Big 3 app</a>' +
           (todayDone
-            ? '<button type="button" class="btn btn-ghost" disabled style="opacity:0.6;cursor:default">Dnes zapsáno ✓</button>'
+            ? '<button type="button" id="b3-undo-today" class="btn btn-ghost">Zrušit dnešek ✓</button>'
             : '<button type="button" id="b3-manual-log" class="btn btn-green">Zapsat dnešek</button>') +
         '</div>' +
+        (!yesterdayDone
+          ? '<button type="button" id="b3-log-yesterday" class="btn btn-sm btn-ghost btn-block" style="margin-top:8px">+ Dopsat včerejšek (' + TOS.formatDateShortCZ(yesterday) + ')</button>'
+          : '') +
         '<details style="margin-top:12px"><summary>Historie posledních 4 týdnů</summary>' +
           '<div style="margin-top:8px">' +
             weeks.slice(1).map(function (wk) {
@@ -181,19 +217,30 @@
 
     container.innerHTML = html;
 
+    container.querySelectorAll('[data-b3-toggle]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        toggleBig3Date(btn.dataset.b3Toggle, curPhaseCode);
+      });
+    });
+
     const manBtn = container.querySelector('#b3-manual-log');
     if (manBtn) {
       manBtn.addEventListener('click', function () {
-        TOS.logActivity({
-          id: 'big3_' + today,
-          date: today,
-          type: 'big3',
-          phase: curPhaseCode,
-          detail: 'McGill Big 3 (ruční zápis)',
-          value: 'hotovo'
-        });
-        TOS.toast('Dnešní McGill Big 3 zapsáno');
-        renderBig3(container);
+        toggleBig3Date(today, curPhaseCode);
+      });
+    }
+
+    const undoBtn = container.querySelector('#b3-undo-today');
+    if (undoBtn) {
+      undoBtn.addEventListener('click', function () {
+        toggleBig3Date(today, curPhaseCode);
+      });
+    }
+
+    const yestBtn = container.querySelector('#b3-log-yesterday');
+    if (yestBtn) {
+      yestBtn.addEventListener('click', function () {
+        toggleBig3Date(yesterday, curPhaseCode);
       });
     }
 
